@@ -1,4 +1,4 @@
-/* INFO: ReZygisk code */
+/* INFO: MeowZygisk code */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +41,7 @@ int rezygiskd_connect(uint8_t retry) {
     int ret = connect(fd, (struct sockaddr *)&addr, socklen);
     if (ret == 0) return fd;
     if (retry) {
-      PLOGE("Retrying to connect to ReZygiskd, sleep 1s");
+      PLOGE("Retrying to connect to MeowZygiskd, sleep 1s");
 
       sleep(1);
     }
@@ -55,7 +55,7 @@ int rezygiskd_connect(uint8_t retry) {
 bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_t buf_size) {
   int fd = rezygiskd_connect(1);
   if (fd == -1) {
-    PLOGE("connection to ReZygiskd");
+    PLOGE("connection to MeowZygiskd");
 
     return false;
   }

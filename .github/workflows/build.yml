@@ -1,8 +1,8 @@
-name: Treat Wheel Zygisk CI
+name: Meow Wheel Zygisk CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ wip ]
 
   pull_request:
   merge_group:
@@ -26,5 +26,5 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v7
         with:
-          path: build/TreatWheel.zip
+          path: build/MeowWheel.zip
           archive: false

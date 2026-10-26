@@ -6,7 +6,7 @@ import { runMainPageTransition, runMiniPageEnter, runMiniPageLeave } from './ani
 /* INFO: Prototypes */
 import utils from './utils.js'
 
-const moduleName = 'TreatWheel'
+const moduleName = 'MeowWheel'
 const head = document.getElementsByTagName('head')[0]
 const miniPageRegex = /mini_(.*)_(.*)/
 

@@ -8,12 +8,12 @@
 #include "rz_daemon.h"
 
 #ifdef DEBUG
-  #define LOGD(...) do { __android_log_print(ANDROID_LOG_DEBUG, "TreatWheel", __VA_ARGS__); } while (0)
-  #define LOGI(...) do { __android_log_print(ANDROID_LOG_INFO, "TreatWheel", __VA_ARGS__); } while (0)
-  #define LOGW(...) do { __android_log_print(ANDROID_LOG_WARN, "TreatWheel", __VA_ARGS__); } while (0)
-  #define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, "TreatWheel", __VA_ARGS__); } while (0)
-  #define LOGF(...) do { __android_log_print(ANDROID_LOG_FATAL, "TreatWheel", __VA_ARGS__); } while (0)
-  #define PLOGE(msg, ...) do { __android_log_print(ANDROID_LOG_ERROR, "TreatWheel", "%s: " msg ": %s", __func__, ##__VA_ARGS__, strerror(errno)); } while (0)
+  #define LOGD(...) do { __android_log_print(ANDROID_LOG_DEBUG, "MeowWheel", __VA_ARGS__); } while (0)
+  #define LOGI(...) do { __android_log_print(ANDROID_LOG_INFO, "MeowWheel", __VA_ARGS__); } while (0)
+  #define LOGW(...) do { __android_log_print(ANDROID_LOG_WARN, "MeowWheel", __VA_ARGS__); } while (0)
+  #define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, "MeowWheel", __VA_ARGS__); } while (0)
+  #define LOGF(...) do { __android_log_print(ANDROID_LOG_FATAL, "MeowWheel", __VA_ARGS__); } while (0)
+  #define PLOGE(msg, ...) do { __android_log_print(ANDROID_LOG_ERROR, "MeowWheel", "%s: " msg ": %s", __func__, ##__VA_ARGS__, strerror(errno)); } while (0)
 #else
   #define LOGD(...)
   #define LOGI(...)

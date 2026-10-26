@@ -46,7 +46,7 @@ struct module_state g_state = { 0 };
 
 int my_munmap(void *addr, size_t length) {
   if (addr == rz_base) {
-    LOGD("munmap: dladdr failed, found ReZygisk's library");
+    LOGD("munmap: dladdr failed, found MeowZygisk's library");
 
     /* INFO: Hiding code START - must run BEFORE unmapping libzygisk.so */
     if (g_state.is_ignoring) {
@@ -118,18 +118,18 @@ void preSpecialize(const char *process_name) {
   LOGI("Checking if module is set to be ignoring.");
 
   if (read_loop(cfd, &g_state, sizeof(g_state)) == -1) {
-    LOGI("Failed to read state, requested to dlclose Treat Wheel.");
+    LOGI("Failed to read state, requested to dlclose Meow Wheel.");
 
     g_state.is_ignoring = true;
 
     return;
   }
 
-  /* INFO: Ignore everyone and everything will make Treat Wheel completely disappear and behave like
+  /* INFO: Ignore everyone and everything will make Meow Wheel completely disappear and behave like
               it never existed.
   */
   if (g_state.is_ignoring) {
-    LOGI("Module is set to be ignoring, requested to dlclose Treat Wheel.");
+    LOGI("Module is set to be ignoring, requested to dlclose Meow Wheel.");
 
     return;
   }
@@ -181,7 +181,7 @@ void preAppSpecialize(void *mod_data, struct AppSpecializeArgs *args) {
   preSpecialize(process);
   (*tw_env)->ReleaseStringUTFChars(tw_env, *args->nice_name, process);
 
-  LOGD("Now setting custom unmap hook to hide Treat Wheel's library");
+  LOGD("Now setting custom unmap hook to hide Meow Wheel's library");
   api_table->pltHookRegister(rz_dev, rz_ino, "munmap", (void *)my_munmap, NULL);
   api_table->pltHookCommit();
 
@@ -220,7 +220,7 @@ void preServerSpecialize(void *mod_data, struct ServerSpecializeArgs *args) {
 
   close(cfd);
 
-  LOGD("Successfully initialized Treat Wheel daemon.");
+  LOGD("Successfully initialized Meow Wheel daemon.");
 }
 
 void postAppSpecialize(void *mod_data, const struct AppSpecializeArgs *args) {
@@ -235,7 +235,7 @@ void postServerSpecialize(void *mod_data, const struct ServerSpecializeArgs *arg
 
 __attribute__((constructor)) static void tw_initialization(void) {
   if (!str_starts_with(getprogname(), "zygote")) {
-    LOGI("Process is not zygote, it's ReZygiskd.");
+    LOGI("Process is not zygote, it's MeowZygiskd.");
 
     return;
   }
@@ -252,11 +252,11 @@ __attribute__((constructor)) static void tw_initialization(void) {
     rz_dev = map->dev;
     rz_ino = map->inode;
 
-    LOGD("Found ReZygisk map at %s, dev=%d, ino=%d", map->path, (int)rz_dev, (int)rz_ino);
+    LOGD("Found MeowZygisk map at %s, dev=%d, ino=%d", map->path, (int)rz_dev, (int)rz_ino);
   }
 
   if (rz_dev == 0 || rz_ino == 0) {
-    LOGE("Failed to find ReZygisk's library in maps, requested to dlclose Treat Wheel.");
+    LOGE("Failed to find MeowZygisk's library in maps, requested to dlclose Meow Wheel.");
 
     g_state.is_ignoring = true;
 
@@ -267,7 +267,7 @@ __attribute__((constructor)) static void tw_initialization(void) {
 
   tw_info = tw_get_mem_info();
 
-  LOGD("Treat Wheel memory region: start=%p, size=%zu", (void *)tw_info.start, tw_info.size);
+  LOGD("Meow Wheel memory region: start=%p, size=%zu", (void *)tw_info.start, tw_info.size);
 }
 
 void zygisk_module_entry(struct api_table *table, JNIEnv *env) {
@@ -506,7 +506,7 @@ void zygisk_companion_entry(int module_fd) {
       }
 
       if (has_crashed) {
-        LOGW("Treat Wheel has crashed, refusing to set new state.");
+        LOGW("Meow Wheel has crashed, refusing to set new state.");
 
         continue;
       }
@@ -532,7 +532,7 @@ void zygisk_companion_entry(int module_fd) {
       pthread_mutex_unlock(&process_states_lock);
 
       if (has_crashed) {
-        LOGE("Treat Wheel has crashed, setting proper state.");
+        LOGE("Meow Wheel has crashed, setting proper state.");
 
         pthread_mutex_lock(&process_states_lock);
 
@@ -570,7 +570,7 @@ void zygisk_companion_entry(int module_fd) {
         for (; i < process_states_size; i++) {
           if (process_states[i].pid != ppid) continue;
 
-          LOGD("Found process now finalized in Treat Wheel execution with pid %d, removing. Now, %zu process being tracked.", ppid, process_states_size - 1);
+          LOGD("Found process now finalized in Meow Wheel execution with pid %d, removing. Now, %zu process being tracked.", ppid, process_states_size - 1);
 
           found = &process_states[i];
 
@@ -641,7 +641,7 @@ void zygisk_companion_entry(int module_fd) {
 
           process_states[i].performed_hiding = true;
 
-          LOGD("Updated state for process with pid %d in Treat Wheel execution.", ppid);
+          LOGD("Updated state for process with pid %d in Meow Wheel execution.", ppid);
 
           break;
         }
@@ -667,7 +667,7 @@ void zygisk_companion_entry(int module_fd) {
         process_states[process_states_size].opened_at = mono_sec_now();
         process_states_size++;
 
-        LOGD("Started now Treat Wheel execution for process with pid %d. Now, %zu processes are being tracked.", ppid, process_states_size);
+        LOGD("Started now Meow Wheel execution for process with pid %d. Now, %zu processes are being tracked.", ppid, process_states_size);
 
         pthread_mutex_unlock(&process_states_lock);
       }

@@ -2,7 +2,7 @@
 SKIPUNZIP=1
 
 VERSION=$(grep_prop version "${TMPDIR}/module.prop")
-ui_print "- Installing Treat Wheel $VERSION"
+ui_print "- Installing Meow Wheel $VERSION"
 
 if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x86" ] && [ "$ARCH" != "x64" ]; then
   abort "! Unsupported platform: $ARCH"
@@ -12,32 +12,32 @@ fi
 
 # INFO: Zygisk Assistant and NoHello are not supported. If present, refuse to install
 if [ -d "/data/adb/modules/zygisk_assistant" ] || [ -d "/data/adb/modules_update/zygisk_assistant" ]; then
-  abort "! Zygisk Assistant is outdated and causes detections. Please uninstall it before installing Treat Wheel."
+  abort "! Zygisk Assistant is outdated and causes detections. Please uninstall it before installing Meow Wheel."
 fi
 
 if [ -d "/data/adb/modules/nohello" ] || [ -d "/data/adb/modules_update/nohello" ]; then
-  abort "! NoHello is outdated and doesn't provide any benefits. Please uninstall it before installing Treat Wheel."
+  abort "! NoHello is outdated and doesn't provide any benefits. Please uninstall it before installing Meow Wheel."
 fi
 
 REZYGISK_REQUIRED_VERSION=508
 
-# INFO: Treat Wheel won't work in any other Zygisk anyway. Demand ReZygisk.
+# INFO: Meow Wheel won't work in any other Zygisk anyway. Demand MeowZygisk.
 if [ -d "/data/adb/modules_update/rezygisk" ]; then
   REZYGISK_PATH="/data/adb/modules_update/rezygisk"
 elif [ -d "/data/adb/modules/rezygisk" ]; then
   REZYGISK_PATH="/data/adb/modules/rezygisk"
 else
-  ui_print "- ReZygisk $REZYGISK_REQUIRED_VERSION or higher is required but not found."
-  abort    "- No other Zygisk implementation is supported or works with Treat Wheel."
+  ui_print "- MeowZygisk $REZYGISK_REQUIRED_VERSION or higher is required but not found."
+  abort    "- No other Zygisk implementation is supported or works with Meow Wheel."
 fi
 
 REZYGISK_VERSION=$(grep_prop versionCode $REZYGISK_PATH/module.prop)
 if [ -z "$REZYGISK_VERSION" ]; then
-  abort "! Could not determine the installed ReZygisk's version."
+  abort "! Could not determine the installed MeowZygisk's version."
 fi
 
 if [ "$REZYGISK_VERSION" -lt "$REZYGISK_REQUIRED_VERSION" ]; then
-  ui_print "! The installed ReZygisk ($REZYGISK_VERSION) is too old."
+  ui_print "! The installed MeowZygisk ($REZYGISK_VERSION) is too old."
   abort    "! Please update to version $REZYGISK_REQUIRED_VERSION or higher."
 fi
 
@@ -168,4 +168,4 @@ if ! grep -q "disable_denylist_logic_inversion=true" "/data/adb/treat_wheel/stat
   echo "disable_denylist_logic_inversion=true" >> "/data/adb/treat_wheel/state"
 fi
 
-ui_print "- Welcome to Treat Wheel $VERSION"
+ui_print "- Welcome to Meow Wheel $VERSION"

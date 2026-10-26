@@ -35,7 +35,7 @@ const HidingState = {
 export async function loadOnce() {
   let state = await exec('cat /data/adb/treat_wheel/state')
   if (state.errno !== 0) {
-    toast('Error getting state of Treat Wheel!')
+    toast('Error getting state of Meow Wheel!')
 
     return;
   }

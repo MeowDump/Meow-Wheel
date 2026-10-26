@@ -166,5 +166,5 @@ int main(void) {
   compact_props();
   fix_serials();
 
-  __android_log_print(ANDROID_LOG_INFO, "Treat Wheel", "has set and adjusted system properties successfully.\n");
+  __android_log_print(ANDROID_LOG_INFO, "Meow Wheel", "has set and adjusted system properties successfully.\n");
 }

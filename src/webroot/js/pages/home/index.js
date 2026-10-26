@@ -22,7 +22,7 @@ async function _isModuleDisabled() {
 async function _isModuleIgnoring() {
   let state = await exec('cat /data/adb/treat_wheel/state')
   if (state.errno !== 0) {
-    toast('Error getting state of Treat Wheel!')
+    toast('Error getting state of Meow Wheel!')
 
     return;
   }
@@ -38,7 +38,7 @@ async function _isModuleIgnoring() {
 async function _getVersion() {
   let moduleProp = await exec('cat /data/adb/modules/treat_wheel/module.prop')
   if (moduleProp.errno !== 0) {
-    toast('Error getting state of Treat Wheel!')
+    toast('Error getting state of Meow Wheel!')
 
     return;
   }

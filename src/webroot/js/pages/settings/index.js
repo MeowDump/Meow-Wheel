@@ -16,7 +16,7 @@ export async function onceViewAfterUpdate() {
 }
 
 export async function load() {
-  const WebUIConfig = JSON.parse(localStorage.getItem('/TreatWheel/webui_config') || '{}')
+  const WebUIConfig = JSON.parse(localStorage.getItem('/MeowWheel/webui_config') || '{}')
 
   const lang_page_toggle = document.getElementById('lang_page_toggle')
 
@@ -45,7 +45,7 @@ export async function load() {
   utils.addListener(tw_webui_fullscreen_switch, 'click', () => {
     /* INFO: This is swapped, as it meant to disable the fullscreen */
     WebUIConfig.disableFullscreen = !WebUIConfig.disableFullscreen
-    localStorage.setItem('/TreatWheel/webui_config', JSON.stringify(WebUIConfig))
+    localStorage.setItem('/MeowWheel/webui_config', JSON.stringify(WebUIConfig))
 
     fullScreen(!WebUIConfig.disableFullscreen)
   })

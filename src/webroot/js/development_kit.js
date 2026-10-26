@@ -16,7 +16,7 @@ const developmentResponse = {
   },
   'cat /data/adb/modules/treat_wheel/module.prop': {
     errno: 0,
-    stdout: 'id=treat_wheel\nversion=1.2.3\nname=Treat Wheel\nversionCode=123\nauthor=ThePedroo\n',
+    stdout: 'id=treat_wheel\nversion=1.2.3\nname=Meow Wheel\nversionCode=123\nauthor=ThePedroo\n',
     stderr: ''
   },
   '/data/adb/ksud debug version': {

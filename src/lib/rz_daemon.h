@@ -1,4 +1,4 @@
-/* INFO: ReZygisk code */
+/* INFO: MeowZygisk code */
 
 #ifndef RZ_DAEMON_H
 #define RZ_DAEMON_H
