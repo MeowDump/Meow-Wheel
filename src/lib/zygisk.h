@@ -80,9 +80,11 @@ struct api_table {
 };
 
 __attribute__((visibility("default")))
-void zygisk_module_entry(struct api_table *, JNIEnv *);
+void meow_wheel_module_entry(struct api_table *, JNIEnv *);
+void meow_wheel_zygote_init(void);
+void meow_wheel_before_provider_unmap(void);
 
 __attribute__((visibility("default")))
-void zygisk_companion_entry(int);
+void meow_wheel_companion_entry(int);
 
 #endif /* ZYGISK_H */

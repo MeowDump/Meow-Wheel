@@ -32,66 +32,27 @@ struct api_table *api_table;
 JNIEnv *tw_env;
 
 /* INFO: Global variables, the same for all processes */
-void *rz_base = NULL;
-dev_t rz_dev;
-ino_t rz_ino;
-
-struct tw_mem_info tw_info;
 
 /* INFO: Process specific variables */
 uint32_t flags = 0;
 
 int cfd = -1;
 struct module_state g_state = { 0 };
+static bool tw_initialized = false;
+static bool tw_init_failed = false;
 
-int my_munmap(void *addr, size_t length) {
-  if (addr == rz_base) {
-    LOGD("munmap: dladdr failed, found MeowZygisk's library");
+static bool tw_initialize(void) {
+  if (access("/data/adb/treat_wheel/disabled", F_OK) == 0) return false;
+  if (tw_init_failed) return false;
+  if (tw_initialized) return true;
 
-    /* INFO: Hiding code START - must run BEFORE unmapping libzygisk.so */
-    if (g_state.is_ignoring) {
-      LOGD("Module is set to be ignoring, nothing to do in deconstruction.");
-
-      goto finish_hiding_post;
-    }
-
-    if (!(((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST && g_state.disable_denylist_logic_inversion) || 
-        ((flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST && !g_state.disable_denylist_logic_inversion))) {
-      LOGD("Process not on denylist, nothing to do in deconstruction.");
-
-      goto finish_hiding_post;
-    }
-
-    /* INFO: Utilizes dl_iterate_phdr, by CSOLoader, which resides in libzygisk.so */
-    if (!g_state.disable_module_loading_traces_hiding) do_atexit_hiding(api_table, tw_env);
-
-    finish_hiding_post:
-      do_deinitialize();
-
-      /* INFO: Part of module status system */
-      enum daemon_operations op = DAEMON_CHECK_POINT;
-      write_loop(cfd, &op, sizeof(op));
-
-      enum module_status status = MODULE_STATUS_HIDING;
-      write_loop(cfd, &status, sizeof(status));
-
-      uint32_t pid = getpid();
-      write_loop(cfd, &pid, sizeof(pid));
-
-      op = DAEMON_GOODBYE;
-      write_loop(cfd, &op, sizeof(op));
-
-      close(cfd);
-      /* INFO: Part of module status system */
-    /* INFO: Hiding code END */
-
-    /* INFO: Now safe to unmap libzygisk.so */
-    munmap(addr, length);
-
-    [[clang::musttail]] return munmap((void *)tw_info.start, tw_info.size);
+  if (!do_preinitialize()) {
+    tw_init_failed = true;
+    return false;
   }
 
-  return munmap(addr, length);
+  tw_initialized = true;
+  return true;
 }
 
 void preSpecialize(const char *process_name) {
@@ -118,10 +79,11 @@ void preSpecialize(const char *process_name) {
   LOGI("Checking if module is set to be ignoring.");
 
   if (read_loop(cfd, &g_state, sizeof(g_state)) == -1) {
-    LOGI("Failed to read state, requested to dlclose Meow Wheel.");
+    LOGI("Failed to read state; disabling Meow Wheel for this process.");
 
     g_state.is_ignoring = true;
-
+    close(cfd);
+    cfd = -1;
     return;
   }
 
@@ -129,8 +91,10 @@ void preSpecialize(const char *process_name) {
               it never existed.
   */
   if (g_state.is_ignoring) {
-    LOGI("Module is set to be ignoring, requested to dlclose Meow Wheel.");
-
+    LOGI("Module is set to be ignoring; skipping Meow Wheel.");
+    close(cfd);
+    cfd = -1;
+    do_deinitialize();
     return;
   }
 
@@ -170,20 +134,17 @@ void preSpecialize(const char *process_name) {
 void preAppSpecialize(void *mod_data, struct AppSpecializeArgs *args) {
   (void) mod_data; (void) args;
 
-  if (g_state.is_ignoring) {
-    api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
-
-    return;
-  }
+  if (tw_init_failed || access("/data/adb/treat_wheel/disabled", F_OK) == 0 || g_state.is_ignoring) return;
 
   /* INFO: Deferencing nice_name is necessary. In C++, & does that job */
   const char *process = (*tw_env)->GetStringUTFChars(tw_env, *args->nice_name, NULL);
   preSpecialize(process);
   (*tw_env)->ReleaseStringUTFChars(tw_env, *args->nice_name, process);
 
-  LOGD("Now setting custom unmap hook to hide Meow Wheel's library");
-  api_table->pltHookRegister(rz_dev, rz_ino, "munmap", (void *)my_munmap, NULL);
-  api_table->pltHookCommit();
+  if (cfd == -1 || g_state.is_ignoring) {
+    do_deinitialize();
+    return;
+  }
 
   enum daemon_operations op = DAEMON_CHECK_POINT;
   write_loop(cfd, &op, sizeof(op));
@@ -198,11 +159,7 @@ void preAppSpecialize(void *mod_data, struct AppSpecializeArgs *args) {
 void preServerSpecialize(void *mod_data, struct ServerSpecializeArgs *args) {
   (void) mod_data; (void) args;
 
-  if (g_state.is_ignoring) {
-    api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
-
-    return;
-  }
+  if (tw_init_failed || access("/data/adb/treat_wheel/disabled", F_OK) == 0 || g_state.is_ignoring) return;
 
   cfd = api_table->connectCompanion(api_table->impl);
   if (cfd == -1) return;
@@ -214,11 +171,13 @@ void preServerSpecialize(void *mod_data, struct ServerSpecializeArgs *args) {
     LOGI("Failed to read state in system server.");
 
     close(cfd);
+    cfd = -1;
 
     return;
   }
 
   close(cfd);
+  cfd = -1;
 
   LOGD("Successfully initialized Meow Wheel daemon.");
 }
@@ -229,50 +188,45 @@ void postAppSpecialize(void *mod_data, const struct AppSpecializeArgs *args) {
 
 void postServerSpecialize(void *mod_data, const struct ServerSpecializeArgs *args) {
   (void) mod_data; (void) args;
-
-  api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
+  if (tw_initialized) do_deinitialize();
 }
 
-__attribute__((constructor)) static void tw_initialization(void) {
-  if (!str_starts_with(getprogname(), "zygote")) {
-    LOGI("Process is not zygote, it's MeowZygiskd.");
-
-    return;
-  }
-
-  /* INFO: Global initialization */
-  do_preinitialize();
-
-  struct maps *maps = get_global_maps();
-  for (size_t i = 0; i < maps->size; i++) {
-    struct map *map = &maps->maps[i];
-    if (!map->path || !strstr(map->path, "rezygisk")) continue;
-
-    if (!rz_base) rz_base = (void *)map->addr_start;
-    rz_dev = map->dev;
-    rz_ino = map->inode;
-
-    LOGD("Found MeowZygisk map at %s, dev=%d, ino=%d", map->path, (int)rz_dev, (int)rz_ino);
-  }
-
-  if (rz_dev == 0 || rz_ino == 0) {
-    LOGE("Failed to find MeowZygisk's library in maps, requested to dlclose Meow Wheel.");
-
-    g_state.is_ignoring = true;
-
-    do_deinitialize();
-
-    return;
-  }
-
-  tw_info = tw_get_mem_info();
-
-  LOGD("Meow Wheel memory region: start=%p, size=%zu", (void *)tw_info.start, tw_info.size);
+void meow_wheel_zygote_init(void) {
+  tw_initialize();
 }
 
-void zygisk_module_entry(struct api_table *table, JNIEnv *env) {
+void meow_wheel_before_provider_unmap(void) {
+  if (cfd < 0) return;
+
+  if (!g_state.is_ignoring &&
+      (((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST && g_state.disable_denylist_logic_inversion) ||
+       ((flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST && !g_state.disable_denylist_logic_inversion)) &&
+      !g_state.disable_module_loading_traces_hiding) {
+    do_atexit_hiding(api_table, tw_env);
+  }
+
+  do_deinitialize();
+
+  enum daemon_operations op = DAEMON_CHECK_POINT;
+  write_loop(cfd, &op, sizeof(op));
+
+  enum module_status status = MODULE_STATUS_HIDING;
+  write_loop(cfd, &status, sizeof(status));
+
+  uint32_t pid = getpid();
+  write_loop(cfd, &pid, sizeof(pid));
+
+  op = DAEMON_GOODBYE;
+  write_loop(cfd, &op, sizeof(op));
+
+  close(cfd);
+  cfd = -1;
+}
+
+void meow_wheel_module_entry(struct api_table *table, JNIEnv *env) {
   api_table = table;
   tw_env = env;
+  tw_initialize();
 
   static struct module_abi abi = {
     .api_version = 5,
@@ -309,7 +263,7 @@ static struct tw_process_state *process_states = NULL;
 static size_t process_states_size = 0;
 static pthread_mutex_t process_states_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void zygisk_companion_entry(int module_fd) {
+void meow_wheel_companion_entry(int module_fd) {
   while (1) {
     enum daemon_operations op;
     ssize_t ret = read(module_fd, &op, sizeof(op));
