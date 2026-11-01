@@ -1,7 +1,6 @@
 id=treat_wheel
 name=Meow Wheel
-version=v0.0.11
-versionCode=0011
+version=submodule
+versionCode=0000
 author=𝗠𝗘𝗢𝗪𝗻𝗮 💅 & @ThePedroo
-description=The wheel to reinvent the new light.
-updateJson=https://raw.githubusercontent.com/MeowDump/Meow-Wheel/refs/heads/main/release.json
+description=MeowZygisk backend
