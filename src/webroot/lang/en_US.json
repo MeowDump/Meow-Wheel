@@ -45,8 +45,8 @@
         "description": "This option will make Meow Wheel stop hiding suspicious mapping. This type of hiding is futile, but it helps pass some detections."
       },
       "ReVancedModuleMountsHiding": {
-        "title": "Disable ReVanced modules mounts hiding",
-        "description": "This option will make Meow Wheel stop hiding the mounts that ReVanced modules creates globally. ReVanced modules must explicitly have support to Meow Wheel for it to umount them."
+        "title": "Disable ReVanced/Morphe module mounts hiding",
+        "description": "This option will make Meow Wheel stop hiding mounts created globally by supported ReVanced and Morphe modules. Modules must include a tw_config file with module_type=revanced or module_type=morphe and allow_umount=true."
       },
       "customFontLoading": {
         "title": "Disable custom font loading",
