@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <stdint.h>
 #include <link.h>
 #include <time.h>
 #include <sys/wait.h>
@@ -19,6 +20,31 @@
 #include <android/log.h>
 
 #include "utils.h"
+
+/* Grow arrays geometrically to avoid reallocating for every parsed entry. */
+static void *grow_array(void *array, size_t *capacity, size_t required, size_t element_size) {
+  if (required <= *capacity) return array;
+  if (element_size == 0 || required > SIZE_MAX / element_size) return NULL;
+
+  size_t new_capacity = *capacity ? *capacity : 16;
+  while (new_capacity < required) {
+    if (new_capacity > SIZE_MAX / 2) {
+      new_capacity = required;
+      break;
+    }
+    new_capacity *= 2;
+  }
+
+  if (new_capacity > SIZE_MAX / element_size) return NULL;
+
+  void *new_array = realloc(array, new_capacity * element_size);
+  if (!new_array) return NULL;
+
+  memset((char *)new_array + (*capacity * element_size), 0,
+         (new_capacity - *capacity) * element_size);
+  *capacity = new_capacity;
+  return new_array;
+}
 
 bool str_starts_with(const char *str, const char *needle) {
   size_t needle_len = strlen(needle);
@@ -79,8 +105,9 @@ struct maps *parse_maps(const char *filename) {
     FILE *fp = fopen(filename, "r");
     if (!fp) {
       PLOGE("Open maps");
-
-      return NULL;
+      close(write_fd);
+      close(read_fd);
+      _exit(1);
     }
 
     char line[4096 * 2];
@@ -176,8 +203,10 @@ struct maps *parse_maps(const char *filename) {
   }
 
   maps->maps = NULL;
+  maps->size = 0;
 
   size_t i = 0;
+  size_t capacity = 0;
   while (1) {
     #define READ_AND_ASSURE(field)                                                                                \
       if (read_loop(read_fd, &maps->maps[i].field, sizeof(maps->maps[i].field)) != sizeof(maps->maps[i].field)) { \
@@ -195,12 +224,13 @@ struct maps *parse_maps(const char *filename) {
 
     if (!has_more_maps) break;
 
-    maps->maps = (struct map *)realloc(maps->maps, (i + 1) * sizeof(struct map));
-    if (!maps->maps) {
-      PLOGE("Realloc maps");
-
+    struct map *new_maps = (struct map *)grow_array(maps->maps, &capacity, i + 1, sizeof(struct map));
+    if (!new_maps) {
+      PLOGE("Allocate memory for maps");
       goto maps_read_fail;
     }
+    maps->maps = new_maps;
+    maps->size = i + 1;
 
     READ_AND_ASSURE(addr_start);
     READ_AND_ASSURE(addr_end);
@@ -246,7 +276,6 @@ struct maps *parse_maps(const char *filename) {
       close(write_fd);
       close(read_fd);
 
-      maps->size = i;
       free_maps(maps);
 
       waitpid(new_pid, NULL, 0);
@@ -306,8 +335,9 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
     FILE *fp = fopen(filename, "r");
     if (!fp) {
       LOGE("Open %s failed with %d: %s", filename, errno, strerror(errno));
-
-      return NULL;
+      close(write_fd);
+      close(read_fd);
+      _exit(1);
     }
 
     char line[4096 * 2];
@@ -443,8 +473,10 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
   }
 
   mounts->mounts = NULL;
+  mounts->size = 0;
 
   size_t i = 0;
+  size_t capacity = 0;
   while (1) {
     #define READ_AND_ASSURE(field)                                                                                            \
       if (read_loop(read_fd, &mounts->mounts[i].field, sizeof(mounts->mounts[i].field)) != sizeof(mounts->mounts[i].field)) { \
@@ -453,7 +485,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
         close(write_fd);                                                                                                      \
         close(read_fd);                                                                                                       \
                                                                                                                               \
-        mounts->size = i;                                                                                                     \
+        mounts->size = i + 1;                                                                                                   \
         free_mountsinfo(mounts);                                                                                              \
                                                                                                                               \
         return NULL;                                                                                                          \
@@ -467,7 +499,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
         close(write_fd);                                                                      \
         close(read_fd);                                                                       \
                                                                                               \
-        mounts->size = i;                                                                     \
+        mounts->size = i + 1;                                                                   \
         free_mountsinfo(mounts);                                                              \
                                                                                               \
         return NULL;                                                                          \
@@ -481,7 +513,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
           close(write_fd);                                                                    \
           close(read_fd);                                                                     \
                                                                                               \
-          mounts->size = i;                                                                   \
+          mounts->size = i + 1;                                                                 \
           free_mountsinfo(mounts);                                                            \
                                                                                               \
           return NULL;                                                                        \
@@ -493,7 +525,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
           close(write_fd);                                                                    \
           close(read_fd);                                                                     \
                                                                                               \
-          mounts->size = i;                                                                   \
+          mounts->size = i + 1;                                                                 \
           free_mountsinfo(mounts);                                                            \
                                                                                               \
           return NULL;                                                                        \
@@ -519,8 +551,8 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
 
     if (!has_more_maps) break;
 
-    mounts->mounts = (struct mountinfo *)realloc(mounts->mounts, (i + 1) * sizeof(struct mountinfo));
-    if (!mounts->mounts) {
+    struct mountinfo *new_mounts = (struct mountinfo *)grow_array(mounts->mounts, &capacity, i + 1, sizeof(struct mountinfo));
+    if (!new_mounts) {
       PLOGE("Allocate memory for mounts->mounts");
 
       close(write_fd);
@@ -531,6 +563,8 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
 
       return NULL;
     }
+    mounts->mounts = new_mounts;
+    mounts->size = i + 1;
 
     READ_AND_ASSURE(id);
     READ_AND_ASSURE(parent);
@@ -547,7 +581,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
       close(write_fd);
       close(read_fd);
 
-      mounts->size = i;
+      mounts->size = i + 1;
       free_mountsinfo(mounts);
 
       return NULL;
@@ -560,7 +594,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
       close(write_fd);
       close(read_fd);
 
-      mounts->size = i;
+      mounts->size = i + 1;
       free_mountsinfo(mounts);
 
       return NULL;
@@ -573,7 +607,7 @@ struct mountsinfo *parse_mountinfo(const char *filename) {
       close(write_fd);
       close(read_fd);
 
-      mounts->size = i;
+      mounts->size = i + 1;
       free_mountsinfo(mounts);
 
       return NULL;
