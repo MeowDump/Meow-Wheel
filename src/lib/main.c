@@ -31,28 +31,23 @@
 struct api_table *api_table;
 JNIEnv *tw_env;
 
-/* INFO: Global variables, the same for all processes */
-
-/* INFO: Process specific variables */
 uint32_t flags = 0;
 
 int cfd = -1;
 struct module_state g_state = { 0 };
-static bool tw_initialized = false;
-static bool tw_init_failed = false;
 
-static bool tw_initialize(void) {
-  if (access("/data/adb/treat_wheel/disabled", F_OK) == 0) return false;
-  if (tw_init_failed) return false;
-  if (tw_initialized) return true;
+static bool should_apply_denylist_behavior(uint32_t process_flags) {
+  if (g_state.disable_denylist_logic_inversion &&
+      (process_flags & PROCESS_ROOT_IS_MAGISK) == PROCESS_ROOT_IS_MAGISK) {
+    if ((process_flags & PROCESS_IS_MANAGER) == PROCESS_IS_MANAGER) return false;
 
-  if (!do_preinitialize()) {
-    tw_init_failed = true;
-    return false;
+    return (process_flags & PROCESS_GRANTED_ROOT) != PROCESS_GRANTED_ROOT;
   }
 
-  tw_initialized = true;
-  return true;
+  return ((process_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST &&
+          g_state.disable_denylist_logic_inversion) ||
+         ((process_flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST &&
+          !g_state.disable_denylist_logic_inversion);
 }
 
 void preSpecialize(const char *process_name) {
@@ -79,11 +74,10 @@ void preSpecialize(const char *process_name) {
   LOGI("Checking if module is set to be ignoring.");
 
   if (read_loop(cfd, &g_state, sizeof(g_state)) == -1) {
-    LOGI("Failed to read state; disabling Meow Wheel for this process.");
+    LOGI("Failed to read state, requested to dlclose Meow Wheel.");
 
     g_state.is_ignoring = true;
-    close(cfd);
-    cfd = -1;
+
     return;
   }
 
@@ -91,10 +85,8 @@ void preSpecialize(const char *process_name) {
               it never existed.
   */
   if (g_state.is_ignoring) {
-    LOGI("Module is set to be ignoring; skipping Meow Wheel.");
-    close(cfd);
-    cfd = -1;
-    do_deinitialize();
+    LOGI("Module is set to be ignoring, requested to dlclose Meow Wheel.");
+
     return;
   }
 
@@ -110,8 +102,7 @@ void preSpecialize(const char *process_name) {
   /* INFO: Part of module status system */
 
   flags = api_table->getFlags(api_table->impl);
-  if (((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST && g_state.disable_denylist_logic_inversion) || 
-      ((flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST && !g_state.disable_denylist_logic_inversion)) {
+  if (should_apply_denylist_behavior(flags)) {
     LOGI("Process is on denylist, cleaning extended traces.");
 
     if (!g_state.disable_gsi_hiding && !do_gsi_hiding(api_table, tw_env)) return;
@@ -125,8 +116,7 @@ void preSpecialize(const char *process_name) {
     if (!do_denylist_logic_inversion(api_table, tw_env, flags)) return;
   }
 
-  if (((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST && g_state.disable_denylist_logic_inversion) || 
-      ((flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST && !g_state.disable_denylist_logic_inversion)) {
+  if (should_apply_denylist_behavior(flags)) {
     if (!g_state.disable_revanced_mounts_umount && !do_revanced_mounts_umount(api_table, tw_env, process_name)) return;
   }
 }
@@ -134,17 +124,16 @@ void preSpecialize(const char *process_name) {
 void preAppSpecialize(void *mod_data, struct AppSpecializeArgs *args) {
   (void) mod_data; (void) args;
 
-  if (tw_init_failed || access("/data/adb/treat_wheel/disabled", F_OK) == 0 || g_state.is_ignoring) return;
+  if (g_state.is_ignoring) {
+    api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
+
+    return;
+  }
 
   /* INFO: Deferencing nice_name is necessary. In C++, & does that job */
   const char *process = (*tw_env)->GetStringUTFChars(tw_env, *args->nice_name, NULL);
   preSpecialize(process);
   (*tw_env)->ReleaseStringUTFChars(tw_env, *args->nice_name, process);
-
-  if (cfd == -1 || g_state.is_ignoring) {
-    do_deinitialize();
-    return;
-  }
 
   enum daemon_operations op = DAEMON_CHECK_POINT;
   write_loop(cfd, &op, sizeof(op));
@@ -159,25 +148,29 @@ void preAppSpecialize(void *mod_data, struct AppSpecializeArgs *args) {
 void preServerSpecialize(void *mod_data, struct ServerSpecializeArgs *args) {
   (void) mod_data; (void) args;
 
-  if (tw_init_failed || access("/data/adb/treat_wheel/disabled", F_OK) == 0 || g_state.is_ignoring) return;
-
-  cfd = api_table->connectCompanion(api_table->impl);
-  if (cfd == -1) return;
-
-  enum daemon_operations op = DAEMON_CHECK_IGNORING;
-  write_loop(cfd, &op, sizeof(op));
-
-  if (read_loop(cfd, &g_state, sizeof(g_state)) == -1) {
-    LOGI("Failed to read state in system server.");
-
-    close(cfd);
-    cfd = -1;
+  if (g_state.is_ignoring) {
+    api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
 
     return;
   }
 
-  close(cfd);
-  cfd = -1;
+  int companion_fd = api_table->connectCompanion(api_table->impl);
+  if (companion_fd == -1) return;
+
+  enum daemon_operations op = DAEMON_CHECK_IGNORING;
+  if (write_loop(companion_fd, &op, sizeof(op)) != (ssize_t)sizeof(op)) {
+    LOGI("Failed to send state request in system server.");
+    close(companion_fd);
+    return;
+  }
+
+  if (read_loop(companion_fd, &g_state, sizeof(g_state)) != (ssize_t)sizeof(g_state)) {
+    LOGI("Failed to read state in system server.");
+    close(companion_fd);
+    return;
+  }
+
+  close(companion_fd);
 
   LOGD("Successfully initialized Meow Wheel daemon.");
 }
@@ -188,45 +181,44 @@ void postAppSpecialize(void *mod_data, const struct AppSpecializeArgs *args) {
 
 void postServerSpecialize(void *mod_data, const struct ServerSpecializeArgs *args) {
   (void) mod_data; (void) args;
-  if (tw_initialized) do_deinitialize();
+
+  api_table->setOption(api_table->impl, DLCLOSE_MODULE_LIBRARY);
 }
 
-void meow_wheel_zygote_init(void) {
-  tw_initialize();
-}
+static bool tw_zygote_initialized = false;
 
-void meow_wheel_before_provider_unmap(void) {
-  if (cfd < 0) return;
-
-  if (!g_state.is_ignoring &&
-      (((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST && g_state.disable_denylist_logic_inversion) ||
-       ((flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST && !g_state.disable_denylist_logic_inversion)) &&
-      !g_state.disable_module_loading_traces_hiding) {
-    do_atexit_hiding(api_table, tw_env);
+static void tw_zygote_init_internal(void) {
+  if (tw_zygote_initialized) return;
+  if (!str_starts_with(getprogname(), "zygote")) {
+    LOGI("Process is not zygote, it's MeowZygiskd.");
+    return;
   }
 
-  do_deinitialize();
+  tw_zygote_initialized = true;
 
-  enum daemon_operations op = DAEMON_CHECK_POINT;
-  write_loop(cfd, &op, sizeof(op));
+  /* INFO: Global initialization */
+  if (!do_preinitialize()) {
+    LOGE("Failed to initialize process maps, requested to dlclose Meow Wheel.");
+    g_state.is_ignoring = true;
+    return;
+  }
 
-  enum module_status status = MODULE_STATUS_HIDING;
-  write_loop(cfd, &status, sizeof(status));
-
-  uint32_t pid = getpid();
-  write_loop(cfd, &pid, sizeof(pid));
-
-  op = DAEMON_GOODBYE;
-  write_loop(cfd, &op, sizeof(op));
-
-  close(cfd);
-  cfd = -1;
+  LOGD("Meow Wheel initialized as part of the ReZygisk provider.");
 }
 
-void meow_wheel_module_entry(struct api_table *table, JNIEnv *env) {
+__attribute__((constructor)) static void tw_initialization(void) {
+  tw_zygote_init_internal();
+}
+
+/* ReZygisk host callback: initialize Meow Wheel after loading it into Zygote. */
+__attribute__((visibility("default")))
+void meow_wheel_zygote_init(void) {
+  tw_zygote_init_internal();
+}
+
+void zygisk_module_entry(struct api_table *table, JNIEnv *env) {
   api_table = table;
   tw_env = env;
-  tw_initialize();
 
   static struct module_abi abi = {
     .api_version = 5,
@@ -239,11 +231,46 @@ void meow_wheel_module_entry(struct api_table *table, JNIEnv *env) {
   if (!table->registerModule(table, &abi)) return;
 }
 
-static bool has_crashed = false;
+struct meow_wheel_api;
 
-/* INFO: mnt string caching system */
+__attribute__((visibility("default")))
+void meow_wheel_module_entry(struct meow_wheel_api *api, JNIEnv *env) {
+  zygisk_module_entry((struct api_table *)api, env);
+}
+
+__attribute__((visibility("default")))
+void meow_wheel_before_provider_unmap(void) {
+  if (!g_state.is_ignoring && should_apply_denylist_behavior(flags) &&
+      !g_state.disable_module_loading_traces_hiding) {
+    do_atexit_hiding(api_table, tw_env);
+  }
+
+  do_deinitialize();
+
+  /* Keep the companion's process state in sync with the provider lifecycle. */
+  if (cfd >= 0) {
+    enum daemon_operations op = DAEMON_CHECK_POINT;
+    if (write_loop(cfd, &op, sizeof(op)) == (ssize_t)sizeof(op)) {
+      enum module_status status = MODULE_STATUS_HIDING;
+      if (write_loop(cfd, &status, sizeof(status)) == (ssize_t)sizeof(status)) {
+        uint32_t pid = getpid();
+        if (write_loop(cfd, &pid, sizeof(pid)) == (ssize_t)sizeof(pid)) {
+          op = DAEMON_GOODBYE;
+          write_loop(cfd, &op, sizeof(op));
+        }
+      }
+    }
+
+    close(cfd);
+    cfd = -1;
+  }
+}
+
+static bool has_crashed = false;
 static char mnt_string[1024] = { 0 };
 static char *mnt_line = NULL;
+static uint8_t mnt_cache_state = MNT_CACHE_EMPTY;
+static pthread_mutex_t mnt_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* INFO: RVU system */
 static char **rvx_mounts = NULL;
@@ -263,7 +290,7 @@ static struct tw_process_state *process_states = NULL;
 static size_t process_states_size = 0;
 static pthread_mutex_t process_states_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void meow_wheel_companion_entry(int module_fd) {
+void zygisk_companion_entry(int module_fd) {
   while (1) {
     enum daemon_operations op;
     ssize_t ret = read(module_fd, &op, sizeof(op));
@@ -625,44 +652,71 @@ void meow_wheel_companion_entry(int module_fd) {
 
         pthread_mutex_unlock(&process_states_lock);
       }
+    } else if (op == DAEMON_CLEAR_MNT_STRING) {
+      pthread_mutex_lock(&mnt_cache_lock);
+      memset(mnt_string, 0, sizeof(mnt_string));
+      mnt_line = NULL;
+      mnt_cache_state = MNT_CACHE_EMPTY;
+      pthread_mutex_unlock(&mnt_cache_lock);
     } else if (op == DAEMON_GET_MNT_STRING) {
-      if (mnt_string[0] == '\0') {
-        /* INFO: First process to hide it, so ask to provide the mnt string */
-        uint8_t ret_state = 0;
-        write_loop(module_fd, &ret_state, sizeof(ret_state));
+      pthread_mutex_lock(&mnt_cache_lock);
 
-        if (read_loop(module_fd, &mnt_line, sizeof(mnt_line)) == -1) {
-          PLOGE("Read mnt_line");
+      uint8_t ret_state = mnt_cache_state;
+      if (write_loop(module_fd, &ret_state, sizeof(ret_state)) != sizeof(ret_state)) {
+        PLOGE("Write mount cache state");
+        pthread_mutex_unlock(&mnt_cache_lock);
+        goto cleanup;
+      }
 
-          goto cleanup;
-        }
-
-        if (read_loop(module_fd, mnt_string, sizeof(mnt_string)) == -1) {
-          PLOGE("Read mnt_string");
-
-          goto cleanup;
-        }
-
+      if (mnt_cache_state == MNT_CACHE_SKIP) {
+        pthread_mutex_unlock(&mnt_cache_lock);
         continue;
       }
 
-      /* INFO: Already have the mnt string, just send it */
-      uint8_t ret_state = 1;
-      write_loop(module_fd, &ret_state, sizeof(ret_state));
+      if (mnt_cache_state == MNT_CACHE_EMPTY) {
+        uint8_t result = MNT_CACHE_EMPTY;
+        if (read_loop(module_fd, &result, sizeof(result)) != (ssize_t)sizeof(result)) {
+          PLOGE("Read mount cache result");
+          pthread_mutex_unlock(&mnt_cache_lock);
+          goto cleanup;
+        }
 
-      /* INFO: The address of the mnt line */
-      if (write_loop(module_fd, &mnt_line, sizeof(mnt_line)) == -1) {
-        PLOGE("Write mnt_line");
+        if (result == MNT_CACHE_READY) {
+          char *received_line = NULL;
+          char received_string[sizeof(mnt_string)];
 
+          if (read_loop(module_fd, &received_line, sizeof(received_line)) != (ssize_t)sizeof(received_line) ||
+              read_loop(module_fd, received_string, sizeof(received_string)) != (ssize_t)sizeof(received_string)) {
+            PLOGE("Read captured mount entry");
+            pthread_mutex_unlock(&mnt_cache_lock);
+            goto cleanup;
+          }
+
+          if (received_line) {
+            mnt_line = received_line;
+            memcpy(mnt_string, received_string, sizeof(mnt_string));
+            mnt_cache_state = MNT_CACHE_READY;
+          } else {
+            LOGE("Received a NULL mount entry address; leaving cache empty.");
+          }
+        } else if (result == MNT_CACHE_SKIP) {
+          mnt_cache_state = MNT_CACHE_SKIP;
+        } else if (result != MNT_CACHE_EMPTY) {
+          LOGE("Received invalid mount cache result %u", result);
+        }
+
+        pthread_mutex_unlock(&mnt_cache_lock);
+        continue;
+      }
+
+      if (write_loop(module_fd, &mnt_line, sizeof(mnt_line)) != sizeof(mnt_line) ||
+          write_loop(module_fd, mnt_string, sizeof(mnt_string)) != sizeof(mnt_string)) {
+        PLOGE("Write cached mount entry");
+        pthread_mutex_unlock(&mnt_cache_lock);
         goto cleanup;
       }
 
-      /* INFO: The content of the mnt line */
-      if (write_loop(module_fd, mnt_string, sizeof(mnt_string)) == -1) {
-        PLOGE("Write mnt_string");
-
-        goto cleanup;
-      }
+      pthread_mutex_unlock(&mnt_cache_lock);
     } else if (op == DAEMON_GET_RVX_MOUNTS) {
       uint32_t ppid;
       if (read_loop(module_fd, &ppid, sizeof(ppid)) == -1) {
@@ -757,19 +811,22 @@ void meow_wheel_companion_entry(int module_fd) {
             while (fgets(line, sizeof(line), config_fp)) {
               if (str_starts_with(line, "module_type=")) {
                 strncpy(module_type, line + strlen("module_type="), sizeof(module_type) - 1);
-
-                module_type[strcspn(module_type, "\n")] = '\0';
+                module_type[strcspn(module_type, "\r\n")] = '\0';
               } else if (str_starts_with(line, "allow_umount=")) {
-                allow_umount = strncmp(line + strlen("allow_umount="), "true", strlen("true")) == 0;
+                char *value = line + strlen("allow_umount=");
+                value[strcspn(value, "\r\n")] = '\0';
+                allow_umount = str_equal(value, "true");
               }
             }
 
             fclose(config_fp);
 
-            if (str_equal(module_type, "revanced") && allow_umount) {
+            bool is_supported_module = str_equal(module_type, "revanced") ||
+                                       str_equal(module_type, "morphe");
+            if (is_supported_module && allow_umount) {
               tw_rvx_modules_size++;
 
-              LOGD("Module %s is a ReVanced module with umount allowed.", entry->d_name);
+              LOGD("Module %s (%s) has mount unmounting enabled.", entry->d_name, module_type);
             }
           }
 
@@ -949,4 +1006,13 @@ void meow_wheel_companion_entry(int module_fd) {
 
   cleanup:
     close(module_fd);
+}
+
+
+/*
+ * MeowZygisk companion adapter.
+ */
+__attribute__((visibility("default")))
+void meow_wheel_companion_entry(int module_fd) {
+  zygisk_companion_entry(module_fd);
 }
