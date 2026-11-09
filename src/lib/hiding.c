@@ -1,9 +1,12 @@
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <mntent.h>
+#include <stdio.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -62,157 +65,246 @@ int do_gsi_hiding(struct api_table *api_table, JNIEnv *tw_env) {
   return 1;
 }
 
+#define BIONIC_LINE_BUFFER_SIZE 1024
+
+/*
+ * mincore() catches unmapped ranges; /proc/self/maps additionally ensures the
+ * complete range is writable before we overwrite the cached mount entry.
+ */
+static bool zmlh_range_is_writable(const void *addr, size_t length) {
+  if (!addr || length == 0) return false;
+
+  uintptr_t start = (uintptr_t)addr;
+  if (length > UINTPTR_MAX - start) return false;
+  uintptr_t end = start + length;
+
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) return false;
+
+  uintptr_t page_start = start - (start % (uintptr_t)page_size);
+  uintptr_t span = end - page_start;
+  if (span > UINTPTR_MAX - ((uintptr_t)page_size - 1)) return false;
+  uintptr_t page_span = ((span + (uintptr_t)page_size - 1) / (uintptr_t)page_size) * (uintptr_t)page_size;
+  size_t page_count = (size_t)(page_span / (uintptr_t)page_size);
+
+  unsigned char vec[8];
+  if (page_count == 0 || page_count > sizeof(vec) ||
+      mincore((void *)page_start, (size_t)page_span, vec) == -1) return false;
+
+  FILE *maps_fp = fopen("/proc/self/maps", "r");
+  if (!maps_fp) {
+    PLOGE("ZMLH: Open /proc/self/maps");
+    return false;
+  }
+
+  char line[512];
+  bool writable = false;
+  while (fgets(line, sizeof(line), maps_fp)) {
+    unsigned long long map_start = 0;
+    unsigned long long map_end = 0;
+    char perms[5] = { 0 };
+
+    if (sscanf(line, "%llx-%llx %4s", &map_start, &map_end, perms) != 3) continue;
+    if ((uintptr_t)map_start <= start && (uintptr_t)map_end >= end) {
+      writable = perms[1] == 'w';
+      break;
+    }
+  }
+
+  fclose(maps_fp);
+  return writable;
+}
+
+static bool zmlh_cached_mntent_is_valid(const char *addr) {
+  return zmlh_range_is_writable(addr, BIONIC_LINE_BUFFER_SIZE);
+}
+
+static bool zmlh_capture_mntent(char *mntent_string, char **mntent_line) {
+  int pipes[2];
+  if (pipe(pipes) == -1) {
+    PLOGE("ZMLH: Pipe");
+    return false;
+  }
+
+  int pid = syscall(SYS_clone, SIGCHLD, 0);
+  if (pid == -1) {
+    PLOGE("ZMLH: Clone");
+    close(pipes[0]);
+    close(pipes[1]);
+    return false;
+  }
+
+  if (pid == 0) {
+    close(pipes[0]);
+
+    FILE *fp = setmntent("/proc/self/mounts", "r");
+    if (!fp) {
+      PLOGE("ZMLH: setmntent mounts");
+      close(pipes[1]);
+      _exit(1);
+    }
+
+    uintptr_t value = 0;
+    while (true) {
+      struct mntent *entry = getmntent(fp);
+      if (!entry) break;
+      /* mnt_fsname points to the beginning of bionic's reusable line buffer. */
+      value = (uintptr_t)entry->mnt_fsname;
+    }
+    endmntent(fp);
+
+    if (value == 0 ||
+        write_loop(pipes[1], (void *)value, BIONIC_LINE_BUFFER_SIZE) != BIONIC_LINE_BUFFER_SIZE ||
+        write_loop(pipes[1], &value, sizeof(value)) != sizeof(value)) {
+      PLOGE("ZMLH: Write captured mount entry");
+      close(pipes[1]);
+      _exit(1);
+    }
+
+    close(pipes[1]);
+    _exit(0);
+  }
+
+  close(pipes[1]);
+  ssize_t string_size = read_loop(pipes[0], mntent_string, BIONIC_LINE_BUFFER_SIZE);
+  ssize_t pointer_size = string_size == BIONIC_LINE_BUFFER_SIZE
+      ? read_loop(pipes[0], mntent_line, sizeof(*mntent_line)) : -1;
+  close(pipes[0]);
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(pid, &status, 0);
+  } while (waited == -1 && errno == EINTR);
+
+  if (string_size != BIONIC_LINE_BUFFER_SIZE || pointer_size != (ssize_t)sizeof(*mntent_line) ||
+      waited != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    LOGE("ZMLH: Failed to capture mount entry from child process");
+    return false;
+  }
+
+  LOGD("ZMLH: Captured mount entry: %.*s", BIONIC_LINE_BUFFER_SIZE, mntent_string);
+  return true;
+}
+
+static bool zmlh_publish_mntent(uint8_t result, char *mntent_line, char *mntent_string) {
+  if (write_loop(cfd, &result, sizeof(result)) != sizeof(result)) {
+    PLOGE("ZMLH: Write mount cache result");
+    return false;
+  }
+
+  if (result != MNT_CACHE_READY) return true;
+
+  if (write_loop(cfd, &mntent_line, sizeof(mntent_line)) != sizeof(mntent_line) ||
+      write_loop(cfd, mntent_string, BIONIC_LINE_BUFFER_SIZE) != BIONIC_LINE_BUFFER_SIZE) {
+    PLOGE("ZMLH: Publish mount cache");
+    return false;
+  }
+
+  return true;
+}
+
+static bool zmlh_read_cached_mntent(char *mntent_string, char **mntent_line) {
+  if (read_loop(cfd, mntent_line, sizeof(*mntent_line)) != (ssize_t)sizeof(*mntent_line) ||
+      read_loop(cfd, mntent_string, BIONIC_LINE_BUFFER_SIZE) != BIONIC_LINE_BUFFER_SIZE) {
+    PLOGE("ZMLH: Read cached mount entry");
+    return false;
+  }
+
+  return true;
+}
+
+static bool zmlh_query_mnt_cache(uint8_t *cache_state) {
+  enum daemon_operations op = DAEMON_GET_MNT_STRING;
+  if (write_loop(cfd, &op, sizeof(op)) != sizeof(op) ||
+      read_loop(cfd, cache_state, sizeof(*cache_state)) != (ssize_t)sizeof(*cache_state)) {
+    PLOGE("ZMLH: Query mount cache");
+    return false;
+  }
+
+  return true;
+}
+
+static bool zmlh_clear_mnt_cache(void) {
+  enum daemon_operations op = DAEMON_CLEAR_MNT_STRING;
+  if (write_loop(cfd, &op, sizeof(op)) != sizeof(op)) {
+    PLOGE("ZMLH: Clear mount cache");
+    return false;
+  }
+
+  return true;
+}
+
 int do_zygote_mountinfo_leak_hiding(struct api_table *api_table, JNIEnv *tw_env) {
   (void) api_table; (void) tw_env;
 
   LOGI("ZMLH: Zygote mountinfo leak hiding is enabled, hiding traces.");
 
-  enum daemon_operations op = DAEMON_GET_MNT_STRING;
-  if (write(cfd, &op, sizeof(op)) == -1) {
-    PLOGE("ZMLH: Write operation");
-
-    return 0;
-  }
-
-  uint8_t has_mnt_string;
-  if (read(cfd, &has_mnt_string, sizeof(has_mnt_string)) == -1) {
-    PLOGE("ZMLH: Read has_mnt_string");
-
-    return 0;
-  }
-
-  #define BIONIC_LINE_BUFFER_SIZE 1024
   static char mntent_string[BIONIC_LINE_BUFFER_SIZE];
   char *mntent_line = NULL;
+  uint8_t cache_state = MNT_CACHE_EMPTY;
 
-  if (has_mnt_string == 0) {
-    int pipes[2];
-    if (pipe(pipes) == -1) {
-      PLOGE("ZMLH: Pipe");
+  if (!zmlh_query_mnt_cache(&cache_state)) return 0;
 
-      return 0;
-    }
+  if (cache_state == MNT_CACHE_SKIP) {
+    LOGI("ZMLH: Companion marked mount entry as unsafe; skipping.");
+    return 1;
+  }
 
-    int pid = syscall(SYS_clone, SIGCHLD, 0);
-    if (pid == -1) {
-      PLOGE("ZMLH: Clone");
+  if (cache_state == MNT_CACHE_READY) {
+    if (!zmlh_read_cached_mntent(mntent_string, &mntent_line)) return 0;
 
-      close(pipes[0]);
-      close(pipes[1]);
+    if (!zmlh_cached_mntent_is_valid(mntent_line)) {
+      LOGW("ZMLH: Cached mount entry address %p is stale; recapturing.", (void *)mntent_line);
+      if (!zmlh_clear_mnt_cache() || !zmlh_query_mnt_cache(&cache_state)) return 0;
 
-      return 0;
-    }
+      if (cache_state == MNT_CACHE_SKIP) return 1;
 
-    uintptr_t value = 0;
-    if (pid == 0) {
-      close(pipes[0]);
-
-      FILE *fp = setmntent("/proc/self/mounts", "r");
-      if (!fp) {
-        PLOGE("ZMLH: setmntent mounts");
-
-        close(pipes[1]);
-
-        _exit(0);
+      if (cache_state == MNT_CACHE_READY) {
+        if (!zmlh_read_cached_mntent(mntent_string, &mntent_line)) return 0;
+        if (!zmlh_cached_mntent_is_valid(mntent_line)) {
+          LOGW("ZMLH: Replacement mount entry address %p is still invalid; skipping.", (void *)mntent_line);
+          if (!zmlh_clear_mnt_cache() || !zmlh_query_mnt_cache(&cache_state)) return 0;
+          if (cache_state != MNT_CACHE_EMPTY) return cache_state == MNT_CACHE_SKIP;
+        }
       }
-
-      while (true) {
-        struct mntent *entry = getmntent(fp);
-        /* INFO: mnt_fsname is &line[0] so value is the basse of the 1024-char line buffer */
-        if (entry) value = (uintptr_t)entry->mnt_fsname;
-        else break;
-      }
-      endmntent(fp);
-
-      /* INFO: Copy the entire 1024-char string buffer (NULs included), not strlen. */
-
-      if (write(pipes[1], (void *)value, BIONIC_LINE_BUFFER_SIZE) == -1) {
-        PLOGE("ZMLH: Write pipe");
-
-        close(pipes[1]);
-
-        _exit(0);
-      }
-
-      if (write(pipes[1], &value, sizeof(value)) == -1) {
-        PLOGE("ZMLH: Write pipe value");
-
-        close(pipes[1]);
-
-        _exit(0);
-      }
-
-      close(pipes[1]);
-
-      _exit(0);
-    }
-
-    close(pipes[1]);
-
-    if (read_loop(pipes[0], mntent_string, sizeof(mntent_string)) != sizeof(mntent_string)) {
-      PLOGE("ZMLH: Read pipe");
-
-      close(pipes[0]);
-
-      return 0;
-    }
-
-    if (read_loop(pipes[0], &mntent_line, sizeof(mntent_line)) != sizeof(mntent_line)) {
-      PLOGE("ZMLH: Read pipe mntent line");
-
-      close(pipes[0]);
-
-      return 0;
-    }
-
-    LOGD("ZMLH: Got mntent string: %.*s (%zu)", (int)sizeof(mntent_string), mntent_string, strlen(mntent_string));
-
-    close(pipes[0]);
-
-    waitpid(pid, NULL, 0);
-
-    if (write_loop(cfd, &mntent_line, sizeof(mntent_line)) == -1) {
-      PLOGE("ZMLH: Write mntent_line");
-
-      return 0;
-    }
-
-    if (write_loop(cfd, mntent_string, sizeof(mntent_string)) == -1) {
-      PLOGE("ZMLH: Write mntent_string");
-
-      return 0;
-    }
-  } else {
-    if (read_loop(cfd, &mntent_line, sizeof(mntent_line)) == -1) {
-      PLOGE("ZMLH: Read mntent_line");
-
-      return 0;
-    }
-
-    if (read_loop(cfd, mntent_string, sizeof(mntent_string)) == -1) {
-      PLOGE("ZMLH: Read mntent_string");
-
-      return 0;
     }
   }
 
-  if (!mntent_line) {
-    LOGE("ZMLH: Got NULL mntent_line, nothing to overwrite");
+  if (cache_state == MNT_CACHE_EMPTY) {
+    if (!zmlh_capture_mntent(mntent_string, &mntent_line)) {
+      if (!zmlh_publish_mntent(MNT_CACHE_EMPTY, NULL, NULL)) return 0;
+      return 0;
+    }
 
+    if (!zmlh_cached_mntent_is_valid(mntent_line)) {
+      LOGW("ZMLH: Captured mount entry address %p is unsafe to overwrite; skipping.", (void *)mntent_line);
+      if (!zmlh_publish_mntent(MNT_CACHE_SKIP, NULL, NULL)) return 0;
+      return 1;
+    }
+
+    memcpy(mntent_line, mntent_string, BIONIC_LINE_BUFFER_SIZE);
+    return zmlh_publish_mntent(MNT_CACHE_READY, mntent_line, mntent_string) ? 1 : 0;
+  }
+
+  if (cache_state == MNT_CACHE_READY) {
+    if (!mntent_line) {
+      LOGE("ZMLH: Companion returned a NULL mount entry address.");
+      return 0;
+    }
+
+    memcpy(mntent_line, mntent_string, BIONIC_LINE_BUFFER_SIZE);
+  } else if (cache_state != MNT_CACHE_EMPTY && cache_state != MNT_CACHE_SKIP) {
+    LOGE("ZMLH: Unexpected mount cache state %u", cache_state);
     return 0;
   }
 
-  memcpy(mntent_line, mntent_string, BIONIC_LINE_BUFFER_SIZE);
-
   #ifdef DEBUG
-    /* INFO: Transform NULL bytes to spaces for logging */
     char mntent_log[BIONIC_LINE_BUFFER_SIZE + 1] = { 0 };
     memcpy(mntent_log, mntent_string, BIONIC_LINE_BUFFER_SIZE);
-
     for (size_t i = 0; i < BIONIC_LINE_BUFFER_SIZE; i++) {
       if (mntent_log[i] == '\0') mntent_log[i] = ' ';
     }
-
     LOGI("ZMLH: Finished hiding Zygote mountinfo leak traces: %s", mntent_log);
   #endif
 
@@ -498,21 +590,35 @@ static inline uintptr_t _page_end(uintptr_t addr) {
   return _page_start(addr + system_page_size - 1);
 }
 
-void set_writable(struct AtExitArray *array, bool writable, size_t start_idx, size_t num_entries) {
-  if (array == NULL || array->array_ == NULL) return;
+int set_writable(struct AtExitArray *array, bool writable, size_t start_idx, size_t num_entries) {
+  if (num_entries == 0) return 1;
+  if (array == NULL || array->array_ == NULL || system_page_size == 0) return 0;
+  if (start_idx > array->capacity_ || num_entries > array->capacity_ - start_idx) {
+    LOGE("Invalid atexit protection range: start=%zu count=%zu capacity=%zu", start_idx, num_entries, array->capacity_);
+    return 0;
+  }
+  if (start_idx > SIZE_MAX / sizeof(struct AtExitEntry) ||
+      num_entries > SIZE_MAX / sizeof(struct AtExitEntry) - start_idx) {
+    LOGE("Atexit protection range overflow");
+    return 0;
+  }
 
   size_t start_byte = _page_start(start_idx * sizeof(struct AtExitEntry));
   size_t stop_byte = _page_end((start_idx + num_entries) * sizeof(struct AtExitEntry));
+  if (stop_byte <= start_byte) {
+    LOGE("Invalid atexit page range: start=%zu end=%zu", start_byte, stop_byte);
+    return 0;
+  }
   size_t byte_len = stop_byte - start_byte;
 
   int prot = PROT_READ | (writable ? PROT_WRITE : 0);
   if (mprotect((char *)array->array_ + start_byte, byte_len, prot) != 0) {
     LOGE("Failed to mprotect atexit array: %s", strerror(errno));
-
-    return;
+    return 0;
   }
 
   LOGI("Atexit array set to %s writable from index %zu to %zu", writable ? "writable" : "read-only", start_idx, start_idx + num_entries - 1);
+  return 1;
 }
 
 struct map_range {
@@ -563,10 +669,32 @@ int do_atexit_hiding(struct api_table *api_table, JNIEnv *tw_env) {
 
   pthread_mutex_lock(atexit_lock);
 
-  set_writable(atexit_array, true, 0, atexit_array->size_);
-  size_t old_size = atexit_array->size_;
-
   LOGD("AH: Found atexit array at %p with size %zu and capacity %zu", (void *)atexit_array->array_, atexit_array->size_, atexit_array->capacity_);
+
+  // Some 32-bit bionic processes expose an empty atexit array here. Do not
+  // calculate an inclusive end index for zero entries (size - 1 underflows).
+  if (atexit_array->size_ == 0) {
+    LOGI("AH: Atexit array is empty; skipping trace cleanup.");
+    pthread_mutex_unlock(atexit_lock);
+    elf_destroy(libc);
+    return 1;
+  }
+
+  if (atexit_array->array_ == NULL || atexit_array->capacity_ == 0 ||
+      atexit_array->size_ > atexit_array->capacity_) {
+    LOGE("AH: Invalid atexit array metadata; skipping trace cleanup.");
+    pthread_mutex_unlock(atexit_lock);
+    elf_destroy(libc);
+    return 0;
+  }
+
+  if (!set_writable(atexit_array, true, 0, atexit_array->size_)) {
+    pthread_mutex_unlock(atexit_lock);
+    elf_destroy(libc);
+    return 0;
+  }
+
+  size_t old_size = atexit_array->size_;
 
   /* TODO: Optimize by quickly iterating to see which is the real end (without counting
              the Zygisk module handlers), and set the size to there, and before that, memset
@@ -580,7 +708,7 @@ int do_atexit_hiding(struct api_table *api_table, JNIEnv *tw_env) {
         memmove(&atexit_array->array_[remove_index],  &atexit_array->array_[remove_index + 1],  (atexit_array->size_ - remove_index - 1) * sizeof(struct AtExitEntry));
 
       atexit_array->size_--;
-      atexit_array->total_appends_--;
+      if (atexit_array->total_appends_ > 0) atexit_array->total_appends_--;
 
       LOGD("AH: Removed atexit entry at index %zu, new size is %zu", remove_index, atexit_array->size_);
 
@@ -609,7 +737,13 @@ int do_atexit_hiding(struct api_table *api_table, JNIEnv *tw_env) {
     madvise((char *)atexit_array->array_ + new_bytes, old_bytes - new_bytes, MADV_DONTNEED);
   }
 
-  set_writable(atexit_array, false, 0, atexit_array->size_);
+  // Restore protection over the full range made writable above, even if all
+  // entries were removed while cleaning the array.
+  if (!set_writable(atexit_array, false, 0, old_size)) {
+    pthread_mutex_unlock(atexit_lock);
+    elf_destroy(libc);
+    return 0;
+  }
 
   pthread_mutex_unlock(atexit_lock);
 
