@@ -20,8 +20,7 @@
 
 #include "utils.h"
 #include "elf_util.h"
-
-#include "zygisk.h"
+#include "hiding.h"
 
 static struct maps *g_maps = NULL;
 
@@ -538,18 +537,28 @@ int do_custom_font_loading(struct api_table *api_table, JNIEnv *tw_env) {
   return 1;
 }
 
-int do_denylist_logic_inversion(struct api_table *api_table, JNIEnv *tw_env, enum process_flags flags) {
+bool is_process_exempt_from_denylist(uint32_t process_flags) {
+  const uint32_t exempt_flags = PROCESS_GRANTED_ROOT | PROCESS_IS_MANAGER;
+
+  return (process_flags & exempt_flags) != 0;
+}
+
+int do_denylist_logic_inversion(struct api_table *api_table, JNIEnv *tw_env, uint32_t process_flags) {
   (void) api_table; (void) tw_env;
 
   LOGI("DLI: Denylist logic inversion is enabled, inverting logic.");
 
-  if ((flags & PROCESS_IS_MANAGER) == PROCESS_IS_MANAGER) {
-    LOGI("DLI: Process is Root Manager, skipping.");
+  if (is_process_exempt_from_denylist(process_flags)) {
+    if ((process_flags & PROCESS_GRANTED_ROOT) != 0) {
+      LOGI("DLI: Process has an explicit Magisk root grant, preserving its current mount namespace.");
+    } else {
+      LOGI("DLI: Process is the root manager, preserving its current mount namespace.");
+    }
 
     return 1;
   }
 
-  if ((flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST) {
+  if ((process_flags & PROCESS_ON_DENYLIST) != 0) {
     LOGI("DLI: Process is on denylist, setting mount namespace to Mounted.");
 
     update_mnt_ns(Mounted);
