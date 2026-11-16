@@ -37,17 +37,11 @@ int cfd = -1;
 struct module_state g_state = { 0 };
 
 static bool should_apply_denylist_behavior(uint32_t process_flags) {
-  if (g_state.disable_denylist_logic_inversion &&
-      (process_flags & PROCESS_ROOT_IS_MAGISK) == PROCESS_ROOT_IS_MAGISK) {
-    if ((process_flags & PROCESS_IS_MANAGER) == PROCESS_IS_MANAGER) return false;
+  if (is_process_exempt_from_denylist(process_flags)) return false;
 
-    return (process_flags & PROCESS_GRANTED_ROOT) != PROCESS_GRANTED_ROOT;
-  }
+  const bool on_denylist = (process_flags & PROCESS_ON_DENYLIST) != 0;
 
-  return ((process_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST &&
-          g_state.disable_denylist_logic_inversion) ||
-         ((process_flags & PROCESS_ON_DENYLIST) != PROCESS_ON_DENYLIST &&
-          !g_state.disable_denylist_logic_inversion);
+  return g_state.disable_denylist_logic_inversion ? on_denylist : !on_denylist;
 }
 
 void preSpecialize(const char *process_name) {
@@ -102,7 +96,18 @@ void preSpecialize(const char *process_name) {
   /* INFO: Part of module status system */
 
   flags = api_table->getFlags(api_table->impl);
-  if (should_apply_denylist_behavior(flags)) {
+
+  if (is_process_exempt_from_denylist(flags)) {
+    if ((flags & PROCESS_GRANTED_ROOT) != 0) {
+      LOGI("DLI: Explicit root grant detected; skipping all denylist-dependent operations.");
+    } else {
+      LOGI("DLI: Root manager detected; skipping all denylist-dependent operations.");
+    }
+  }
+
+  const bool apply_denylist_behavior = should_apply_denylist_behavior(flags);
+
+  if (apply_denylist_behavior) {
     LOGI("Process is on denylist, cleaning extended traces.");
 
     if (!g_state.disable_gsi_hiding && !do_gsi_hiding(api_table, tw_env)) return;
@@ -116,7 +121,7 @@ void preSpecialize(const char *process_name) {
     if (!do_denylist_logic_inversion(api_table, tw_env, flags)) return;
   }
 
-  if (should_apply_denylist_behavior(flags)) {
+  if (apply_denylist_behavior) {
     if (!g_state.disable_revanced_mounts_umount && !do_revanced_mounts_umount(api_table, tw_env, process_name)) return;
   }
 }
